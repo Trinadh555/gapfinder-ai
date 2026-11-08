@@ -1,6 +1,8 @@
 "use client";
 import { useCallback, useEffect, useState } from "react";
 import PlanSection from "./PlanSection";
+import ExplainSection from "./ExplainSection";
+import ProgressSection from "./ProgressSection";
 
 type Doc = { id: string; name: string; kind: string; chunks: number };
 type Topic = { id: string; name: string; subtopics: string[]; exam_count: number };
@@ -392,6 +394,13 @@ export default function Home() {
       {/* 5. Revision plan (rebuilds after every new attempt) */}
       {report && syllabus && (
         <PlanSection key={report.attemptId} syllabusDocId={syllabus.id} />
+      )}
+            {syllabus && topics.length > 0 && (
+        <ExplainSection topics={topics.map((t) => ({ id: t.id, name: t.name }))} />
+      )}
+
+      {syllabus && (
+        <ProgressSection key={report?.attemptId ?? "initial"} syllabusDocId={syllabus.id} />
       )}
     </main>
   );
