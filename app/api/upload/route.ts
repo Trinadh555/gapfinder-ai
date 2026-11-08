@@ -36,7 +36,7 @@ export async function POST(req: Request) {
     .single();
   if (error) return NextResponse.json({ error: error.message }, { status: 500 });
 
-  const rows = chunks.map((c) => ({ document_id: doc.id, ...c }));
+  const rows = chunks.map((c, i) => ({ document_id: doc.id, seq: i, ...c }));
   const { error: cErr } = await supabase.from("chunks").insert(rows);
   if (cErr) return NextResponse.json({ error: cErr.message }, { status: 500 });
 
