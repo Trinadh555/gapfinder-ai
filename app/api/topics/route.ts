@@ -26,33 +26,22 @@ const PaperSchema = z.object({
   ),
 });
 
+// Rebuild document text safely from chunks (limit to 40 chunks max for speed)
 async function docText(docId: string, maxChars: number) {
   const { data, error } = await supabase
     .from("chunks")
     .select("content,page")
     .eq("document_id", docId)
     .order("seq")
-    .limit(80);
-
-  if (error) {
-    console.error(`[docText] Error fetching chunks for docId ${docId}:`, error);
-    throw new Error(`Failed to read document chunks: ${error.message}`);
-  }
-
-  if (!data || data.length === 0) return "";
-
+    .limit(40);
+  if (error) throw new Error(error.message);
   let out = "";
   let prevPage = -1;
-  for (const c of data) {
-    if (!c.content) continue;
-    const content =
-      c.page === prevPage && c.content.length > 200
-        ? c.content.slice(200)
-        : "\n" + c.content;
-    out += content;
+  for (const c of data ?? []) {
+    out += c.page === prevPage ? c.content.slice(200) : "\n" + c.content;
     prevPage = c.page;
   }
-  return out.trim().slice(0, maxChars);
+  return out.slice(0, maxChars);
 }
 
 export async function GET(req: Request) {
@@ -70,94 +59,94 @@ export async function GET(req: Request) {
     .select("*")
     .eq("syllabus_doc_id", id)
     .order("position");
-
-  if (error) {
-    console.error("[GET /api/topics] Error:", error);
-    return NextResponse.json({ error: error.message }, { status: 500 });
-  }
-  return NextResponse.json({ topics: data });
+  if (error) return NextResponse.json({ error: error.message }, { status: 500 });
+  return NextResponse.json({ topics: data ?? [] });
 }
 
 export async function POST(req: Request) {
   const user = await getUser(req);
   if (!user) return unauthorized();
 
-  let body;
-  try {
-    body = await req.json();
-  } catch {
-    return NextResponse.json({ error: "Invalid JSON body" }, { status: 400 });
-  }
-
-  const { syllabusDocId, pastPaperDocId } = body;
+  const { syllabusDocId, pastPaperDocId } = await req.json();
   if (!syllabusDocId) {
     return NextResponse.json({ error: "syllabusDocId required" }, { status: 400 });
   }
-
-  if (
-    !(await ownsDoc(user.id, syllabusDocId)) ||
-    (pastPaperDocId && !(await ownsDoc(user.id, pastPaperDocId)))
-  ) {
+  if (!(await ownsDoc(user.id, syllabusDocId))) {
     return NextResponse.json({ error: "Not found" }, { status: 404 });
   }
 
   try {
-    const syllabus = await docText(syllabusDocId, 14000);
+    // 1. Fetch syllabus text (6000 chars is plenty for Table of Contents / Index)
+    const syllabus = await docText(syllabusDocId, 6000);
     if (!syllabus || syllabus.trim().length === 0) {
       return NextResponse.json(
-        { error: "Syllabus document text is empty. Please re-upload the document." },
+        { error: "Syllabus document text is empty. Please upload a readable syllabus or notes." },
         { status: 400 }
       );
     }
 
+    // 2. Generate topics via LLM
     const parsed = await askJSON({
       system:
-        "You extract a topic map from an exam syllabus. Use only what is in the text. Never invent topics.",
-      user: `SYLLABUS TEXT:\n${syllabus}\n\nThe syllabus contains numbered chapters or units (e.g. "Unit 1: Functions", "Unit 2: Matrices" or "1. Functions").\n\nReturn JSON: {"topics":[{"name":"<full unit or chapter title, e.g. Unit 1: Functions>","subtopics":["<subtopic text>", ...]}]}\nRules:\n- Each topic name MUST be descriptive and unique. Do NOT output just the word "Unit". Always include the chapter/topic title.\n- One entry per chapter/unit, in syllabus order.\n- subtopics are the sub-items under that chapter. If none, use an empty list.\n- Ignore page numbers and period counts.\n- Fix obvious spelling typos.`,
+        "You are an academic syllabus parser. Extract 3 to 8 main chapters/topics with their subtopics from the text.\n" +
+        "CRITICAL RULES:\n" +
+        "- Do NOT strip descriptive titles. Keep distinct titles like 'Unit 1: Kinematics' or 'Chapter 2: Forces'.\n" +
+        "- If headings are 'Unit 1', 'Unit 2', append the subject name: e.g. 'Unit 1: Introduction'. Never return just 'Unit'.\n" +
+        "- Each topic must have a unique name.",
+      user: `SYLLABUS / NOTES TEXT:\n${syllabus}\n\nReturn JSON: {"topics":[{"name":"<distinct chapter title>","subtopics":["<subtopic 1>","<subtopic 2>"]}]}`,
       schema: TopicSchema,
+      maxTokens: 1500,
     });
 
-    const seenNames = new Set<string>();
-    const uniqueTopics = parsed.topics.map((t, i) => {
-      let name = t.name.trim();
-      if (seenNames.has(name.toLowerCase())) {
-        name = `${name} (${i + 1})`;
-      }
-      seenNames.add(name.toLowerCase());
-      return {
-        syllabus_doc_id: syllabusDocId,
-        name,
-        subtopics: t.subtopics,
-        position: i,
-        exam_count: 0,
-        exam_questions: [],
-      };
+    // Deduplicate topics by name
+    const seen = new Set<string>();
+    const uniqueTopics = parsed.topics.filter((t) => {
+      const lower = t.name.toLowerCase().trim();
+      if (seen.has(lower)) return false;
+      seen.add(lower);
+      return true;
     });
 
-    await supabase.from("topics").delete().eq("syllabus_doc_id", syllabusDocId);
-
-    const { data: topics, error: insError } = await supabase
-      .from("topics")
-      .insert(uniqueTopics)
-      .select();
-
-    if (insError || !topics) {
-      throw new Error(insError?.message ?? "Failed to insert topics into database");
+    if (uniqueTopics.length === 0) {
+      throw new Error("No unique topics could be extracted from the material.");
     }
 
-    if (pastPaperDocId) {
+    // Delete existing topics for this syllabus
+    await supabase.from("topics").delete().eq("syllabus_doc_id", syllabusDocId);
+
+    // Insert new topics
+    const { data: insertedTopics, error: insertErr } = await supabase
+      .from("topics")
+      .insert(
+        uniqueTopics.map((t, i) => ({
+          syllabus_doc_id: syllabusDocId,
+          name: t.name,
+          subtopics: t.subtopics,
+          position: i,
+          exam_count: 0,
+        }))
+      )
+      .select();
+
+    if (insertErr || !insertedTopics) {
+      throw new Error(insertErr?.message ?? "Failed to save topics to database.");
+    }
+
+    // 3. Map past-paper questions if available (handled safely so topics never fail)
+    if (pastPaperDocId && (await ownsDoc(user.id, pastPaperDocId))) {
       try {
-        const paper = await docText(pastPaperDocId, 14000);
-        if (paper && paper.trim().length > 0) {
-          const names = topics.map((t) => t.name);
+        const paper = await docText(pastPaperDocId, 6000);
+        if (paper && paper.trim().length > 50) {
+          const names = insertedTopics.map((t) => t.name);
           const mapped = await askJSON({
             system:
               "You map exam questions to syllabus topics. Choose only from the given topic list.",
-            user: `TOPICS:\n${names.map((n, i) => `${i + 1}. ${n}`).join("\n")}\n\nQUESTION PAPER TEXT:\n${paper}\n\nList distinct questions found in the paper. Return JSON: {"questions":[{"text":"<question, max 160 chars>","topic":"<copy exactly one name from TOPICS>"}]}`,
+            user: `TOPICS:\n${names.map((n, i) => `${i + 1}. ${n}`).join("\n")}\n\nQUESTION PAPER TEXT:\n${paper}\n\nList questions found. Return JSON: {"questions":[{"text":"<question, max 160 chars>","topic":"<exact name from TOPICS>"}]}`,
             schema: PaperSchema,
+            maxTokens: 1500,
           });
 
-          const byName = new Map(topics.map((t) => [t.name.toLowerCase().trim(), t.id]));
+          const byName = new Map(insertedTopics.map((t) => [t.name.toLowerCase().trim(), t.id]));
           const buckets = new Map<string, string[]>();
           for (const q of mapped.questions) {
             const id = byName.get(q.topic.toLowerCase().trim());
@@ -173,7 +162,7 @@ export async function POST(req: Request) {
           }
         }
       } catch (paperErr) {
-        console.error("[POST /api/topics] Past-paper mapping warning:", paperErr);
+        console.warn("[POST /api/topics] Past paper mapping non-fatal error:", paperErr);
       }
     }
 
@@ -183,9 +172,9 @@ export async function POST(req: Request) {
       .eq("syllabus_doc_id", syllabusDocId)
       .order("position");
 
-    return NextResponse.json({ topics: final });
+    return NextResponse.json({ topics: final ?? insertedTopics });
   } catch (e) {
-    console.error("[POST /api/topics] Error:", e);
+    console.error("[POST /api/topics] Unhandled exception:", e);
     const msg = e instanceof Error ? e.message : String(e);
     return NextResponse.json({ error: msg }, { status: 500 });
   }
