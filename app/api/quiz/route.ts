@@ -44,7 +44,6 @@ async function generateForTopic(
     console.warn("[generateForTopic] RPC search_chunks warning:", rpcErr);
   }
 
-  // Fallback: If search finds 0 chunks, grab any chunks from the uploaded docs
   if (list.length === 0) {
     const { data: fallbackChunks } = await supabase
       .from("chunks")
@@ -127,7 +126,8 @@ export async function POST(req: Request) {
   };
 
   const { syllabusDocId, topicIds, regenerate = false, docIds } = body;
-  const perTopic = body.perTopic ?? 2;
+  const perTopic = Math.min(Math.max(Number(body.perTopic) || 2, 1), 10);
+
   if (!syllabusDocId) {
     return NextResponse.json({ error: "syllabusDocId required" }, { status: 400 });
   }
@@ -150,7 +150,6 @@ export async function POST(req: Request) {
       return NextResponse.json({ error: "Build the topic map first" }, { status: 400 });
     }
 
-    // Step 1: Look for Notes docs first
     let notesQuery = supabase
       .from("documents")
       .select("id,name,kind")
@@ -163,7 +162,6 @@ export async function POST(req: Request) {
     const { data: noteDocs } = await notesQuery;
     let targetDocs = noteDocs ?? [];
 
-    // Step 2: Fallback to Past paper or any uploaded material if Notes are missing
     if (targetDocs.length === 0) {
       let fallbackQuery = supabase
         .from("documents")
@@ -188,7 +186,11 @@ export async function POST(req: Request) {
     const docNames = new Map<string, string>(targetDocs.map((d) => [d.id, d.name]));
     const materialDocIds = targetDocs.map((d) => d.id);
 
-    // Reuse cached questions unless regenerate
+    // If regenerating, clear old questions for these topics
+    if (regenerate) {
+      await supabase.from("questions").delete().in("topic_id", topics.map((t) => t.id));
+    }
+
     const { data: existing } = await supabase
       .from("questions")
       .select("topic_id")
@@ -198,17 +200,17 @@ export async function POST(req: Request) {
     for (const r of existing ?? []) have.set(r.topic_id, (have.get(r.topic_id) ?? 0) + 1);
 
     const todo = topics.filter((t) => regenerate || (have.get(t.id) ?? 0) < perTopic);
-    if (todo.length > 0) {
-      await supabase.from("questions").delete().in("topic_id", todo.map((t) => t.id));
-    }
 
     const skipped: { topic: string; reason: string }[] = [];
     for (let i = 0; i < todo.length; i += 2) {
       await Promise.all(
         todo.slice(i, i + 2).map(async (t) => {
           try {
-            const reason = await generateForTopic(t, materialDocIds, docNames, perTopic);
-            if (reason) skipped.push({ topic: t.name, reason });
+            const need = perTopic - (have.get(t.id) ?? 0);
+            if (need > 0) {
+              const reason = await generateForTopic(t, materialDocIds, docNames, need);
+              if (reason) skipped.push({ topic: t.name, reason });
+            }
           } catch (e) {
             skipped.push({ topic: t.name, reason: e instanceof Error ? e.message : String(e) });
           }
@@ -222,7 +224,6 @@ export async function POST(req: Request) {
       .in("topic_id", topics.map((t) => t.id))
       .order("created_at");
 
-    const topicIndex = new Map(topics.map((t, i) => [t.id, i]));
     const topicName = new Map(topics.map((t) => [t.id, t.name]));
     const counts = new Map<string, number>();
     const questions = [];
@@ -242,7 +243,8 @@ export async function POST(req: Request) {
       });
     }
 
-    questions.sort((a, b) => (topicIndex.get(a.topic_id) ?? 0) - (topicIndex.get(b.topic_id) ?? 0));
+    // SHUFFLE QUESTIONS: Mixes all topics together like a real exam!
+    questions.sort(() => Math.random() - 0.5);
 
     return NextResponse.json({ questions, skipped });
   } catch (e) {

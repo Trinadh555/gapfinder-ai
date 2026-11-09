@@ -65,6 +65,67 @@ const KIND_LABEL: Record<string, string> = {
   past_paper: "Past paper",
 };
 
+type PdfTextItem = { str?: string };
+type PdfJsGlobal = {
+  GlobalWorkerOptions: { workerSrc: string };
+  getDocument: (src: { data: ArrayBuffer }) => {
+    promise: Promise<{
+      numPages: number;
+      getPage: (n: number) => Promise<{
+        getTextContent: () => Promise<{ items: PdfTextItem[] }>;
+      }>;
+    }>;
+  };
+};
+
+declare global {
+  interface Window {
+    pdfjsLib?: PdfJsGlobal;
+  }
+}
+
+async function extractTextClientSide(file: File): Promise<string[]> {
+  if (!file.name.toLowerCase().endsWith(".pdf")) {
+    return [await file.text()];
+  }
+
+  if (typeof window === "undefined") return [];
+
+  if (!window.pdfjsLib) {
+    await new Promise<void>((resolve, reject) => {
+      const script = document.createElement("script");
+      script.src = "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js";
+      script.onload = () => {
+        if (window.pdfjsLib) {
+          window.pdfjsLib.GlobalWorkerOptions.workerSrc =
+            "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js";
+        }
+        resolve();
+      };
+      script.onerror = reject;
+      document.head.appendChild(script);
+    });
+  }
+
+  const pdfjs = window.pdfjsLib;
+  if (!pdfjs) throw new Error("Could not initialize PDF reader");
+
+  const arrayBuffer = await file.arrayBuffer();
+  const pdf = await pdfjs.getDocument({ data: arrayBuffer }).promise;
+  const pages: string[] = [];
+
+  for (let i = 1; i <= pdf.numPages; i++) {
+    const page = await pdf.getPage(i);
+    const content = await page.getTextContent();
+    const pageText = content.items
+      .map((item: PdfTextItem) => item.str ?? "")
+      .join(" ");
+    pages.push(pageText);
+  }
+
+  return pages;
+}
+
 async function post(url: string, body: unknown) {
   const res = await authFetch(url, {
     method: "POST",
@@ -126,11 +187,11 @@ function Dashboard() {
   const [topics, setTopics] = useState<Topic[]>([]);
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [questions, setQuestions] = useState<Question[]>([]);
+  const [perTopic, setPerTopic] = useState<number>(2); // User selectable question count
   const [skipped, setSkipped] = useState<{ topic: string; reason: string }[]>([]);
   const [answers, setAnswers] = useState<Record<string, number>>({});
   const [report, setReport] = useState<Report | null>(null);
 
-  // Docs hidden by "Start new task" (saved in this browser)
   const [hidden, setHidden] = useState<Set<string>>(() => {
     if (typeof window === "undefined") return new Set<string>();
     try {
@@ -140,20 +201,20 @@ function Dashboard() {
     }
   });
 
-  // Only these docs are used for the current task
   const visibleDocs = docs.filter((d) => !hidden.has(d.id));
   const activeDocIds = visibleDocs.map((d) => d.id);
   const chunkCount = visibleDocs.reduce((sum, d) => sum + d.chunks, 0);
+
   const syllabus = visibleDocs.find((d) => d.kind === "syllabus");
+  const effectiveSyllabus =
+    syllabus || visibleDocs.find((d) => d.kind === "notes") || visibleDocs[0];
   const paper = visibleDocs.find((d) => d.kind === "past_paper");
 
-  // Used after an upload to refresh the document list
   const loadDocs = useCallback(async () => {
     const res = await authFetch("/api/documents");
     if (res.ok) setDocs(await res.json());
   }, []);
 
-  // Load documents once when the page opens
   useEffect(() => {
     let cancelled = false;
     authFetch("/api/documents")
@@ -166,11 +227,10 @@ function Dashboard() {
     };
   }, []);
 
-  // Load saved topic map for the syllabus (ESLint Safe)
   useEffect(() => {
-    if (!syllabus?.id) return;
+    if (!effectiveSyllabus?.id) return;
     let cancelled = false;
-    authFetch(`/api/topics?syllabusDocId=${syllabus.id}`)
+    authFetch(`/api/topics?syllabusDocId=${effectiveSyllabus.id}`)
       .then((r) => (r.ok ? r.json() : null))
       .then((d) => {
         if (!cancelled && d?.topics?.length) {
@@ -182,7 +242,7 @@ function Dashboard() {
     return () => {
       cancelled = true;
     };
-  }, [syllabus?.id]);
+  }, [effectiveSyllabus?.id]);
 
   async function run<T>(label: string, fn: () => Promise<T>) {
     setBusy(label);
@@ -199,22 +259,68 @@ function Dashboard() {
   async function onUpload(e: React.FormEvent<HTMLFormElement>) {
     e.preventDefault();
     const form = e.currentTarget;
-    const fd = new FormData(form);
-    fd.set("kind", kind);
-    await run("Uploading...", async () => {
-      const res = await authFetch("/api/upload", { method: "POST", body: fd });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error ?? "Upload failed");
+    const fileInput = form.querySelector('input[type="file"]') as HTMLInputElement;
+    const file = fileInput?.files?.[0];
+    if (!file) return;
+
+    await run("Processing and uploading...", async () => {
+      let res;
+      try {
+        const pages = await extractTextClientSide(file);
+        res = await authFetch("/api/upload", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ name: file.name, kind, pages }),
+        });
+      } catch (clientErr) {
+        console.warn("Client extraction fallback to formData:", clientErr);
+        const fd = new FormData(form);
+        fd.set("kind", kind);
+        res = await authFetch("/api/upload", { method: "POST", body: fd });
+      }
+
+      let data;
+      try {
+        data = await res.json();
+      } catch {
+        if (res.status === 413) {
+          throw new Error("File is too large for hosting. Please compress the PDF.");
+        }
+        throw new Error(`Upload failed (${res.status} ${res.statusText})`);
+      }
+
+      if (!res.ok) throw new Error(data?.error ?? "Upload failed");
       await loadDocs();
       form.reset();
     });
   }
 
+  async function deleteDoc(docId: string, docName: string) {
+    if (!confirm(`Are you sure you want to delete "${docName}"?`)) return;
+
+    await run("Deleting document...", async () => {
+      const res = await authFetch(`/api/documents?id=${docId}`, {
+        method: "DELETE",
+      });
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        throw new Error(data.error ?? "Failed to delete document");
+      }
+      if (effectiveSyllabus?.id === docId) {
+        setTopics([]);
+        setSelected(new Set());
+        setQuestions([]);
+        setReport(null);
+      }
+      await loadDocs();
+    });
+  }
+
   async function buildTopics() {
-    if (!syllabus) return;
+    if (!effectiveSyllabus) return;
     const data = await run("Building topic map...", () =>
       post("/api/topics", {
-        syllabusDocId: syllabus.id,
+        syllabusDocId: effectiveSyllabus.id,
         pastPaperDocId: paper?.id,
         docIds: activeDocIds,
       })
@@ -227,18 +333,17 @@ function Dashboard() {
     }
   }
 
-  // regenerate = true ignores cached questions and writes fresh ones
   async function generateQuiz(regenerate = false) {
-    if (!syllabus) return;
+    if (!effectiveSyllabus) return;
     const data = await run(
       regenerate
         ? "Regenerating quiz with fresh questions..."
-        : "Generating quiz from your material...",
+        : "Generating diagnostic quiz...",
       () =>
         post("/api/quiz", {
-          syllabusDocId: syllabus.id,
+          syllabusDocId: effectiveSyllabus.id,
           topicIds: Array.from(selected),
-          perTopic: 2,
+          perTopic,
           docIds: activeDocIds,
           regenerate,
         })
@@ -252,10 +357,10 @@ function Dashboard() {
   }
 
   async function submit() {
-    if (!syllabus) return;
+    if (!effectiveSyllabus) return;
     const data = await run("Evaluating answers...", () =>
       post("/api/evaluate", {
-        syllabusDocId: syllabus.id,
+        syllabusDocId: effectiveSyllabus.id,
         answers: questions.map((q) => ({
           questionId: q.id,
           chosenIndex: answers[q.id] ?? null,
@@ -265,7 +370,6 @@ function Dashboard() {
     if (data) setReport(data);
   }
 
-  // Hide all current docs and reset everything for a fresh task
   function startNewTask() {
     const next = new Set(hidden);
     docs.forEach((d) => next.add(d.id));
@@ -288,11 +392,6 @@ function Dashboard() {
     setSelected(next);
   }
 
-  const grouped = questions.reduce<Record<string, Question[]>>((acc, q) => {
-    (acc[q.topic] ||= []).push(q);
-    return acc;
-  }, {});
-
   const input =
     "rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-100";
   const btn =
@@ -303,7 +402,6 @@ function Dashboard() {
   return (
     <div className="min-h-screen bg-slate-50 text-slate-900">
       <main className="mx-auto max-w-6xl space-y-6 px-4 py-8 sm:px-8">
-        {/* Header */}
         <header className="flex flex-wrap items-end justify-between gap-4">
           <div>
             <p className="mb-3 text-sm font-bold text-blue-600">◈ GapFinder AI</p>
@@ -338,15 +436,14 @@ function Dashboard() {
           <div className="flex items-center gap-3 rounded-xl border border-blue-200 bg-blue-50 p-4 text-sm text-blue-900">
             <span className="h-4 w-4 animate-spin rounded-full border-2 border-blue-300 border-t-blue-700" />
             <span>
-              {busy} <span className="opacity-60">(can take up to a minute)</span>
+              {busy} <span className="opacity-60">(can take a moment)</span>
             </span>
           </div>
         )}
 
-        {/* Overview dashboard (refreshes after every new attempt) */}
         <OverviewSection
           key={`overview-${report?.attemptId ?? "initial"}`}
-          syllabusDocId={syllabus?.id}
+          syllabusDocId={effectiveSyllabus?.id}
           topicCount={topics.length}
           materialCount={visibleDocs.length}
           chunkCount={chunkCount}
@@ -378,8 +475,8 @@ function Dashboard() {
           />
           <form onSubmit={onUpload} className="flex flex-col gap-3 sm:flex-row sm:items-center">
             <select value={kind} onChange={(e) => setKind(e.target.value)} className={input}>
-              <option value="syllabus">Syllabus</option>
               <option value="notes">Notes / Textbook</option>
+              <option value="syllabus">Syllabus</option>
               <option value="past_paper">Past paper</option>
             </select>
             <input
@@ -397,7 +494,7 @@ function Dashboard() {
             {visibleDocs.map((d) => (
               <li key={d.id} className="flex items-center justify-between gap-3 px-4 py-2.5">
                 <span className="truncate">📄 {d.name}</span>
-                <span className="flex shrink-0 items-center gap-2">
+                <div className="flex shrink-0 items-center gap-2">
                   <span
                     className={`rounded-full px-2 py-0.5 text-xs font-medium ${
                       KIND_BADGE[d.kind] ?? "bg-slate-100 text-slate-700"
@@ -406,12 +503,37 @@ function Dashboard() {
                     {KIND_LABEL[d.kind] ?? d.kind}
                   </span>
                   <span className="text-xs text-slate-400">{d.chunks} chunks</span>
-                </span>
+                  <button
+                    type="button"
+                    onClick={() => deleteDoc(d.id, d.name)}
+                    disabled={!!busy}
+                    title="Delete this document"
+                    className="ml-1 rounded-lg p-1.5 text-slate-400 transition hover:bg-red-50 hover:text-red-600 disabled:opacity-40"
+                  >
+                    <svg
+                      xmlns="http://www.w3.org/2000/svg"
+                      width="15"
+                      height="15"
+                      viewBox="0 0 24 24"
+                      fill="none"
+                      stroke="currentColor"
+                      strokeWidth="2"
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                    >
+                      <path d="M3 6h18" />
+                      <path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6" />
+                      <path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2" />
+                      <line x1="10" y1="11" x2="10" y2="17" />
+                      <line x1="14" y1="11" x2="14" y2="17" />
+                    </svg>
+                  </button>
+                </div>
               </li>
             ))}
             {visibleDocs.length === 0 && (
               <li className="px-4 py-6 text-center text-slate-400">
-                Nothing uploaded yet. Add a syllabus, notes and (optional) a past paper.
+                Nothing uploaded yet. Add your study material (notes, textbook or syllabus).
               </li>
             )}
           </ul>
@@ -420,15 +542,26 @@ function Dashboard() {
         {/* 2. Topic map */}
         <Card id="topics">
           <StepTitle n={2} title="Topic map" />
-          <button onClick={buildTopics} disabled={!syllabus || !!busy} className={btn}>
-            {topics.length ? "Rebuild topic map" : "Build topic map"}
+          <button onClick={buildTopics} disabled={!effectiveSyllabus || !!busy} className={btn}>
+            {topics.length
+              ? "Rebuild topic map"
+              : !syllabus && effectiveSyllabus
+              ? "Build topic map from notes"
+              : "Build topic map"}
           </button>
-          {!syllabus && <p className="text-sm text-slate-400">Upload a syllabus first.</p>}
+          {!effectiveSyllabus && (
+            <p className="text-sm text-slate-400">Upload notes, a textbook, or a syllabus first.</p>
+          )}
+          {!syllabus && effectiveSyllabus && (
+            <p className="rounded-lg bg-blue-50 p-2.5 text-xs text-blue-700">
+              💡 <b>Auto-topic detection:</b> No separate syllabus uploaded. Using the Table of
+              Contents / Chapter outline from <b>{effectiveSyllabus.name}</b>.
+            </p>
+          )}
           {topics.length > 0 && (
             <>
               <p className="text-sm text-slate-500">
-                Tick the chapters you want to be tested on (only chapters whose notes you
-                uploaded will get questions).
+                Tick the chapters you want to be tested on.
               </p>
               <div className="overflow-x-auto rounded-xl border border-slate-200">
                 <table className="w-full text-left text-sm">
@@ -459,70 +592,107 @@ function Dashboard() {
                   </tbody>
                 </table>
               </div>
-              <div className="flex flex-wrap gap-3">
-                <button
-                  onClick={() => generateQuiz(false)}
-                  disabled={selected.size === 0 || !!busy}
-                  className={btn}
-                >
-                  Generate diagnostic quiz
-                </button>
-                <button
-                  onClick={() => generateQuiz(true)}
-                  disabled={selected.size === 0 || !!busy}
-                  className={btnOutline}
-                  title="Ignore saved questions and write new ones from your notes"
-                >
-                  🔄 Regenerate quiz
-                </button>
+
+              {/* Question Count Selector & Generate Buttons */}
+              <div className="flex flex-wrap items-center justify-between gap-4 rounded-xl bg-slate-50 p-4 border border-slate-200">
+                <div className="flex items-center gap-3">
+                  <label className="text-sm font-medium text-slate-700">
+                    Questions per topic:
+                  </label>
+                  <select
+                    value={perTopic}
+                    onChange={(e) => setPerTopic(Number(e.target.value))}
+                    disabled={!!busy}
+                    className="rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-sm font-semibold text-slate-800 focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-100"
+                  >
+                    <option value={1}>1 question each ({selected.size} total)</option>
+                    <option value={2}>2 questions each ({selected.size * 2} total)</option>
+                    <option value={3}>3 questions each ({selected.size * 3} total)</option>
+                    <option value={5}>5 questions each ({selected.size * 5} total)</option>
+                  </select>
+                </div>
+
+                <div className="flex flex-wrap gap-3">
+                  <button
+                    onClick={() => generateQuiz(false)}
+                    disabled={selected.size === 0 || !!busy}
+                    className={btn}
+                  >
+                    Generate mixed quiz ({selected.size * perTopic} Qs)
+                  </button>
+                  <button
+                    onClick={() => generateQuiz(true)}
+                    disabled={selected.size === 0 || !!busy}
+                    className={btnOutline}
+                    title="Ignore saved questions and write new ones from your notes"
+                  >
+                    🔄 Regenerate quiz
+                  </button>
+                </div>
               </div>
             </>
           )}
         </Card>
 
-        {/* 3. Quiz */}
+        {/* 3. Diagnostic quiz (Mixed across all topics!) */}
         {questions.length > 0 && (
           <Card id="quiz">
-            <StepTitle n={3} title="Diagnostic quiz" />
-            {Object.entries(grouped).map(([topic, qs], groupIdx) => (
-              <div key={`${topic}-${groupIdx}`} className="space-y-3">
-                <h3 className="inline-block rounded-full bg-blue-50 px-3 py-1 text-sm font-semibold text-blue-700">
-                  {topic}
-                </h3>
-                {qs.map((q, i) => (
-                  <div key={q.id || `q-${i}`} className="space-y-2 rounded-xl border border-slate-200 p-4">
-                    <p className="whitespace-pre-wrap font-medium">
-                      {i + 1}. {q.question}
-                    </p>
-                    <div className="space-y-2">
-                      {q.options.map((o, idx) => (
-                        <label
-                          key={idx}
-                          className={`flex items-start gap-3 rounded-lg border px-3 py-2 text-sm transition ${
-                            answers[q.id] === idx
-                              ? "border-blue-500 bg-blue-50"
-                              : "border-slate-200 hover:bg-slate-50"
-                          } ${report ? "cursor-default opacity-80" : "cursor-pointer"}`}
-                        >
-                          <input
-                            type="radio"
-                            name={q.id}
-                            className="mt-0.5 accent-blue-600"
-                            disabled={!!report}
-                            checked={answers[q.id] === idx}
-                            onChange={() => setAnswers({ ...answers, [q.id]: idx })}
-                          />
-                          <span>{o}</span>
-                        </label>
-                      ))}
-                    </div>
-                    <p className="text-xs text-slate-400">
-                      📖 Source: {q.citation.doc ?? "notes"}, page {q.citation.page ?? "?"}
-                    </p>
+            <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-100 pb-3">
+              <StepTitle n={3} title="Diagnostic quiz" />
+              <span className="rounded-full bg-blue-50 px-3 py-1 text-xs font-semibold text-blue-700 border border-blue-200">
+                🔀 Mixed Mode ({questions.length} Questions)
+              </span>
+            </div>
+
+            <div className="space-y-4">
+              {questions.map((q, i) => (
+                <div
+                  key={q.id || `q-${i}`}
+                  className="space-y-3 rounded-xl border border-slate-200 bg-white p-5 shadow-xs transition hover:border-slate-300"
+                >
+                  <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-100 pb-2.5">
+                    <span className="text-sm font-bold text-slate-800">
+                      Question {i + 1} of {questions.length}
+                    </span>
+                    <span className="rounded-full bg-blue-100 px-3 py-0.5 text-xs font-semibold text-blue-800">
+                      {q.topic}
+                    </span>
                   </div>
-                ))}
-              </div>
-            ))}
+
+                  <p className="whitespace-pre-wrap font-medium text-slate-900 leading-relaxed text-base">
+                    {q.question}
+                  </p>
+
+                  <div className="space-y-2 pt-1">
+                    {q.options.map((o, idx) => (
+                      <label
+                        key={idx}
+                        className={`flex items-start gap-3 rounded-lg border px-3.5 py-2.5 text-sm transition ${
+                          answers[q.id] === idx
+                            ? "border-blue-500 bg-blue-50/70 font-medium text-blue-900 shadow-xs"
+                            : "border-slate-200 hover:bg-slate-50 text-slate-700"
+                        } ${report ? "cursor-default opacity-80" : "cursor-pointer"}`}
+                      >
+                        <input
+                          type="radio"
+                          name={q.id}
+                          className="mt-0.5 accent-blue-600"
+                          disabled={!!report}
+                          checked={answers[q.id] === idx}
+                          onChange={() => setAnswers({ ...answers, [q.id]: idx })}
+                        />
+                        <span>{o}</span>
+                      </label>
+                    ))}
+                  </div>
+
+                  <p className="text-xs text-slate-400 pt-1">
+                    📖 Source: {q.citation.doc ?? "notes"}, page {q.citation.page ?? "?"}
+                  </p>
+                </div>
+              ))}
+            </div>
+
             {skipped.length > 0 && (
               <details className="rounded-lg bg-slate-50 p-3 text-xs text-slate-600">
                 <summary className="cursor-pointer font-medium">
@@ -537,6 +707,7 @@ function Dashboard() {
                 </ul>
               </details>
             )}
+
             {!report && (
               <button onClick={submit} disabled={!!busy} className={btn}>
                 Submit answers ({Object.keys(answers).length}/{questions.length} answered)
@@ -555,7 +726,10 @@ function Dashboard() {
             </div>
             <div className="space-y-2">
               {report.topics.map((t, i) => (
-                <div key={`${t.topicId || t.name}-${i}`} className={`rounded-xl border p-4 ${STYLE[t.status]}`}>
+                <div
+                  key={`${t.topicId || t.name}-${i}`}
+                  className={`rounded-xl border p-4 ${STYLE[t.status]}`}
+                >
                   <div className="flex justify-between gap-3 font-semibold">
                     <span>
                       {LABEL[t.status]} · {t.name}
@@ -575,7 +749,7 @@ function Dashboard() {
             <h3 className="pt-2 font-semibold">Answer review</h3>
             {report.results.map((r, i) => (
               <div
-                key={`${r.questionId || 'res'}-${i}`}
+                key={`${r.questionId || "res"}-${i}`}
                 className={`space-y-1 rounded-xl border p-4 text-sm ${
                   r.isCorrect ? "border-blue-200 bg-blue-50/50" : "border-red-200 bg-red-50/50"
                 }`}
@@ -601,24 +775,24 @@ function Dashboard() {
           </Card>
         )}
 
-        {/* 5. Revision plan (rebuilds after every new attempt) */}
-        {report && syllabus && (
+        {/* 5. Revision plan */}
+        {report && effectiveSyllabus && (
           <div id="plan" className="scroll-mt-6">
-            <PlanSection key={`plan-${report.attemptId}`} syllabusDocId={syllabus.id} />
+            <PlanSection key={`plan-${report.attemptId}`} syllabusDocId={effectiveSyllabus.id} />
           </div>
         )}
 
         {/* 6. Explain this topic */}
-        {syllabus && topics.length > 0 && (
+        {effectiveSyllabus && topics.length > 0 && (
           <ExplainSection topics={topics.map((t) => ({ id: t.id, name: t.name }))} />
         )}
 
         {/* 7. Progress dashboard */}
-        {syllabus && (
+        {effectiveSyllabus && (
           <div id="progress" className="scroll-mt-6">
             <ProgressSection
               key={`progress-${report?.attemptId ?? "initial"}`}
-              syllabusDocId={syllabus.id}
+              syllabusDocId={effectiveSyllabus.id}
             />
           </div>
         )}
