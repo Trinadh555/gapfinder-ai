@@ -5,6 +5,29 @@ import { authFetch } from "@/lib/authFetch";
 type Source = { n: number; doc: string; page: number };
 type Msg = { role: "user" | "assistant"; content: string; sources?: Source[] };
 
+// Cleans up any accidental LaTeX slashes into clean, readable math
+function cleanMathText(text: string): string {
+  if (!text) return "";
+  return text
+    // Replace LaTeX brackets
+    .replace(/\\\[\s*/g, "\n")
+    .replace(/\s*\\\]/g, "\n")
+    .replace(/\\\(\s*/g, "")
+    .replace(/\s*\\\)/g, "")
+    // Replace common LaTeX symbols
+    .replace(/\\frac\{([^}]+)\}\{([^}]+)\}/g, "($1 / $2)")
+    .replace(/\\sigma/g, "σ")
+    .replace(/\\alpha/g, "α")
+    .replace(/\\beta/g, "β")
+    .replace(/\\theta/g, "θ")
+    .replace(/\\times/g, "×")
+    .replace(/\\cdot/g, "·")
+    .replace(/\\approx/g, "≈")
+    .replace(/\\le/g, "≤")
+    .replace(/\\ge/g, "≥")
+    .replace(/\\,/g, " ");
+}
+
 export default function ExplainSection({
   topics,
 }: {
@@ -57,6 +80,17 @@ export default function ExplainSection({
         setMessages([...history, { role: "assistant", content: acc, sources }]);
         chunk = await reader.read();
       }
+
+      if (!acc.trim()) {
+        setMessages([
+          ...history,
+          {
+            role: "assistant",
+            content:
+              "The AI is busy right now (free-tier limit). Please wait about 15 seconds and ask again.",
+          },
+        ]);
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
       setMessages(history);
@@ -66,16 +100,23 @@ export default function ExplainSection({
   }
 
   return (
-    <section className="space-y-3 rounded border p-4">
-      <h2 className="text-xl font-semibold">6. Explain this topic</h2>
-      <p className="text-sm opacity-70">
-        Answers come only from your uploaded notes, with page citations.
-      </p>
+    <section className="space-y-4 rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
+      <div className="flex items-center gap-3">
+        <span className="flex h-8 w-8 items-center justify-center rounded-full bg-indigo-600 text-sm font-bold text-white">
+          6
+        </span>
+        <div>
+          <h2 className="text-xl font-semibold text-slate-900">Explain this topic</h2>
+          <p className="text-sm text-slate-500">
+            Answers come only from your uploaded notes, with page citations.
+          </p>
+        </div>
+      </div>
 
       <select
         value={topic}
         onChange={(e) => setTopic(e.target.value)}
-        className="border bg-white p-2 text-black"
+        className="rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 focus:border-indigo-500 focus:outline-none focus:ring-2 focus:ring-indigo-200"
       >
         <option value="">Any topic</option>
         {topics.map((t) => (
@@ -85,29 +126,45 @@ export default function ExplainSection({
         ))}
       </select>
 
-      <div className="space-y-2">
-        {messages.map((m, i) => (
-          <div
-            key={i}
-            className={`rounded border p-3 text-sm ${m.role === "user" ? "bg-gray-100 text-black" : ""}`}
-          >
-            <p className="mb-1 text-xs font-semibold opacity-60">
-              {m.role === "user" ? "You" : "Tutor"}
-            </p>
-            <p className="whitespace-pre-wrap">{m.content || "..."}</p>
-            {m.sources && m.sources.length > 0 && m.content && (
-              <p className="mt-2 text-xs opacity-60">
-                📖 Sources:{" "}
-                {m.sources.map((s) => `[${s.n}] ${s.doc}, p.${s.page}`).join(" · ")}
-              </p>
-            )}
-          </div>
-        ))}
-      </div>
+      {messages.length > 0 && (
+        <div className="max-h-112 space-y-3 overflow-y-auto rounded-xl bg-slate-50 p-4">
+          {messages.map((m, i) => (
+            <div
+              key={i}
+              className={`flex ${m.role === "user" ? "justify-end" : "justify-start"}`}
+            >
+              <div
+                className={`max-w-[85%] rounded-2xl px-4 py-3 text-sm ${
+                  m.role === "user"
+                    ? "rounded-br-sm bg-indigo-600 text-white"
+                    : "rounded-bl-sm border border-slate-200 bg-white text-slate-800"
+                }`}
+              >
+                <p
+                  className={`mb-1 text-xs font-semibold ${
+                    m.role === "user" ? "text-indigo-200" : "text-slate-400"
+                  }`}
+                >
+                  {m.role === "user" ? "You" : "Tutor"}
+                </p>
+                <p className="whitespace-pre-wrap leading-relaxed">
+                  {cleanMathText(m.content) || "..."}
+                </p>
+                {m.sources && m.sources.length > 0 && m.content && (
+                  <p className="mt-2 border-t border-slate-100 pt-2 text-xs text-slate-400">
+                    📖 Sources:{" "}
+                    {m.sources.map((s) => `[${s.n}] ${s.doc}, p.${s.page}`).join(" · ")}
+                  </p>
+                )}
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
 
       {error && (
-        <div className="rounded border border-red-400 bg-red-100 p-3 text-sm text-red-900">
-          {error}
+        <div className="rounded-xl border border-red-300 bg-red-50 p-4 text-sm text-red-900">
+          ⚠️ {error}
         </div>
       )}
 
@@ -115,12 +172,12 @@ export default function ExplainSection({
         <input
           value={input}
           onChange={(e) => setInput(e.target.value)}
-          placeholder="e.g. What is the transpose of a matrix? / important questions on matrices"
-          className="flex-1 border bg-white p-2 text-black"
+          placeholder="e.g. What is the transpose of a matrix? / What is sigmoid function?"
+          className="flex-1 rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 focus:border-indigo-500 focus:outline-none focus:ring-2 focus:ring-indigo-200"
         />
         <button
           disabled={busy || !input.trim()}
-          className="rounded bg-black px-4 py-2 text-white disabled:opacity-40"
+          className="rounded-lg bg-indigo-600 px-5 py-2 text-sm font-medium text-white shadow-sm transition hover:bg-indigo-700 disabled:cursor-not-allowed disabled:opacity-40"
         >
           {busy ? "..." : "Ask"}
         </button>

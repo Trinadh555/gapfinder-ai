@@ -16,7 +16,12 @@ type PlanTopic = {
 };
 type Plan = { days: Day[]; topics: PlanTopic[]; message?: string };
 
-const DOT: Record<Status, string> = { weak: "🔴", medium: "🟡", strong: "🟢" };
+const DOT: Record<Status, string> = { weak: "🔴", medium: "🟡", strong: "🔵" };
+const BORDER: Record<Status, string> = {
+  weak: "border-l-red-400",
+  medium: "border-l-amber-400",
+  strong: "border-l-blue-500",
+};
 
 export default function PlanSection({ syllabusDocId }: { syllabusDocId: string }) {
   // draft = what the user is typing, params = what the plan was built with
@@ -62,14 +67,21 @@ export default function PlanSection({ syllabusDocId }: { syllabusDocId: string }
     setParams({ ...draft });
   }
 
-  const input = "w-20 border p-1 bg-white text-black";
+  const input =
+    "w-24 rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-100";
 
   return (
-    <section className="space-y-4 rounded border p-4">
-      <h2 className="text-xl font-semibold">5. Your revision plan</h2>
-      <div className="flex flex-wrap items-center gap-3 text-sm">
-        <label>
-          Days left{" "}
+    <section className="space-y-4 rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
+      <div className="flex items-center gap-3">
+        <span className="flex h-8 w-8 items-center justify-center rounded-full bg-blue-600 text-sm font-bold text-white">
+          5
+        </span>
+        <h2 className="text-xl font-semibold text-slate-900">Your revision plan</h2>
+      </div>
+
+      <div className="flex flex-wrap items-end gap-4 rounded-xl bg-slate-50 p-4 text-sm">
+        <label className="flex flex-col gap-1 text-slate-600">
+          Days left
           <input
             type="number"
             min={1}
@@ -79,8 +91,8 @@ export default function PlanSection({ syllabusDocId }: { syllabusDocId: string }
             className={input}
           />
         </label>
-        <label>
-          Hours per day{" "}
+        <label className="flex flex-col gap-1 text-slate-600">
+          Hours per day
           <input
             type="number"
             min={0.5}
@@ -94,35 +106,38 @@ export default function PlanSection({ syllabusDocId }: { syllabusDocId: string }
         <button
           onClick={update}
           disabled={loading}
-          className="rounded bg-black px-4 py-2 text-white disabled:opacity-40"
+          className="rounded-xl bg-blue-600 px-5 py-2.5 text-sm font-semibold text-white shadow-sm transition hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-40"
         >
           {loading ? "Planning..." : "Update plan"}
         </button>
       </div>
 
       {error && (
-        <div className="rounded border border-red-400 bg-red-100 p-3 text-sm text-red-900">
-          {error}
+        <div className="rounded-xl border border-red-300 bg-red-50 p-4 text-sm text-red-900">
+          ⚠️ {error}
         </div>
       )}
-      {plan?.message && <p>{plan.message}</p>}
+      {plan?.message && <p className="text-sm text-slate-600">{plan.message}</p>}
 
       {plan && plan.topics.length > 0 && (
         <>
           <div className="space-y-2">
-            <h3 className="font-semibold">Priority order</h3>
+            <h3 className="font-semibold text-slate-900">Priority order</h3>
             {plan.topics.map((t, i) => (
-              <div key={t.name} className="rounded border p-3 text-sm">
-                <div className="flex justify-between font-semibold">
+              <div
+                key={`${t.name}-${i}`}
+                className={`rounded-xl border border-l-4 border-slate-200 p-4 text-sm ${BORDER[t.status]}`}
+              >
+                <div className="flex flex-wrap justify-between gap-2 font-semibold">
                   <span>
                     {i + 1}. {DOT[t.status]} {t.name}
                   </span>
-                  <span>
+                  <span className="rounded-full bg-slate-100 px-3 py-0.5 text-xs font-medium text-slate-700">
                     {t.minutes} min · score {t.pct}%
                   </span>
                 </div>
-                <p>{t.tip}</p>
-                <p className="text-xs opacity-60">
+                <p className="mt-1 text-slate-700">{t.tip}</p>
+                <p className="mt-1 text-xs text-slate-400">
                   Past paper questions: {t.examCount}
                   {t.sources.length > 0 && ` · Revise: ${t.sources.join("; ")}`}
                 </p>
@@ -131,23 +146,32 @@ export default function PlanSection({ syllabusDocId }: { syllabusDocId: string }
           </div>
 
           <div className="space-y-2">
-            <h3 className="font-semibold">Day by day</h3>
-            {plan.days
-              .filter((d) => d.sessions.length > 0)
-              .map((d) => (
-                <div key={d.day} className="rounded border p-3 text-sm">
-                  <p className="font-semibold">
-                    Day {d.day} <span className="opacity-60">({d.used} min)</span>
-                  </p>
-                  <ul className="list-disc pl-5">
-                    {d.sessions.map((s, i) => (
-                      <li key={i}>
-                        {DOT[s.status]} {s.topic} — {s.minutes} min
-                      </li>
-                    ))}
-                  </ul>
-                </div>
-              ))}
+            <h3 className="font-semibold text-slate-900">Day by day</h3>
+            <div className="grid gap-3 sm:grid-cols-2">
+              {plan.days
+                .filter((d) => d.sessions.length > 0)
+                .map((d) => (
+                  <div
+                    key={d.day}
+                    className="rounded-xl border border-slate-200 bg-slate-50/50 p-4 text-sm"
+                  >
+                    <p className="font-semibold text-blue-700">
+                      Day {d.day}{" "}
+                      <span className="font-normal text-slate-400">({d.used} min)</span>
+                    </p>
+                    <ul className="mt-2 space-y-1">
+                      {d.sessions.map((s, i) => (
+                        <li key={i} className="flex justify-between gap-2">
+                          <span>
+                            {DOT[s.status]} {s.topic}
+                          </span>
+                          <span className="shrink-0 text-slate-500">{s.minutes} min</span>
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                ))}
+            </div>
           </div>
         </>
       )}

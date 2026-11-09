@@ -29,10 +29,14 @@ export default function AuthGate({ children }: { children: React.ReactNode }) {
   }, []);
 
   async function signIn(e: string, p: string) {
+    if (!e.trim() || !p) {
+      setMsg("Enter your email and password first.");
+      return;
+    }
     setBusy(true);
     setMsg("");
     const { error } = await supabaseBrowser.auth.signInWithPassword({
-      email: e,
+      email: e.trim(),
       password: p,
     });
     if (error) setMsg(error.message);
@@ -40,32 +44,50 @@ export default function AuthGate({ children }: { children: React.ReactNode }) {
   }
 
   async function signUp() {
+    if (!email.trim() || password.length < 6) {
+      setMsg(
+        "Enter your email and a password (at least 6 characters), then click Create account."
+      );
+      return;
+    }
     setBusy(true);
     setMsg("");
-    const { data, error } = await supabaseBrowser.auth.signUp({ email, password });
+    const { data, error } = await supabaseBrowser.auth.signUp({
+      email: email.trim(),
+      password,
+    });
     if (error) setMsg(error.message);
     else if (!data.session) setMsg("Account created. Confirm your email, then sign in.");
     setBusy(false);
   }
 
   if (session === undefined) {
-    return <p className="p-8 text-sm opacity-60">Loading...</p>;
+    return (
+      <div className="flex min-h-screen items-center justify-center bg-slate-50">
+        <p className="text-sm font-medium text-slate-400">Loading...</p>
+      </div>
+    );
   }
 
   if (session === null) {
-    const input = "w-full border bg-white p-2 text-black";
-    const btn = "w-full rounded bg-black px-4 py-2 text-white disabled:opacity-40";
+    const input =
+      "w-full rounded-xl border border-slate-300 bg-white p-2.5 text-sm text-slate-900 focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-100";
+    const btn =
+      "w-full rounded-xl bg-blue-600 px-4 py-2.5 text-sm font-semibold text-white shadow-sm transition hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-40";
     return (
-      <main className="mx-auto mt-16 max-w-sm space-y-4 rounded border p-6">
-        <h1 className="text-2xl font-bold">GapFinder AI</h1>
-        <p className="text-sm opacity-70">Log in to see your gaps and revision plan.</p>
+      <main className="mx-auto mt-16 max-w-sm space-y-4 rounded-2xl border border-slate-200 bg-white p-8 shadow-sm">
+        <div className="space-y-1">
+          <p className="text-sm font-bold text-blue-600">◈ GapFinder AI</p>
+          <h1 className="text-2xl font-bold tracking-tight text-slate-900">Welcome</h1>
+          <p className="text-sm text-slate-500">Log in to see your gaps and revision plan.</p>
+        </div>
 
         <form
           onSubmit={(e) => {
             e.preventDefault();
             signIn(email, password);
           }}
-          className="space-y-3"
+          className="space-y-3 pt-2"
         >
           <input
             type="email"
@@ -91,29 +113,30 @@ export default function AuthGate({ children }: { children: React.ReactNode }) {
             type="button"
             disabled={busy}
             onClick={signUp}
-            className="w-full rounded border px-4 py-2 disabled:opacity-40"
+            className="w-full rounded-xl border border-slate-300 bg-white px-4 py-2.5 text-sm font-semibold text-slate-700 transition hover:bg-slate-50 disabled:opacity-40"
           >
             Create account
           </button>
         </form>
 
         {msg && (
-          <div className="rounded border border-red-400 bg-red-100 p-2 text-sm text-red-900">
+          <div className="rounded-xl border border-red-300 bg-red-50 p-3 text-xs text-red-900">
             {msg}
           </div>
         )}
 
-        <div className="space-y-2 border-t pt-4">
+        <div className="space-y-2 border-t border-slate-100 pt-4">
           <button
             type="button"
             disabled={busy}
             onClick={() => signIn(DEMO_EMAIL, DEMO_PASSWORD)}
-            className="w-full rounded border border-blue-500 px-4 py-2 text-blue-700 disabled:opacity-40"
+            className="w-full rounded-xl border border-blue-200 bg-blue-50/70 px-4 py-2.5 text-sm font-semibold text-blue-700 transition hover:bg-blue-100/70 disabled:opacity-40"
           >
             Use demo account
           </button>
-          <p className="text-xs opacity-60">
-            Demo login: {DEMO_EMAIL} / {DEMO_PASSWORD}
+          <p className="text-center text-xs text-slate-400">
+            Demo login: <span className="font-mono text-slate-600">{DEMO_EMAIL}</span> /{" "}
+            <span className="font-mono text-slate-600">{DEMO_PASSWORD}</span>
           </p>
         </div>
       </main>
@@ -122,14 +145,19 @@ export default function AuthGate({ children }: { children: React.ReactNode }) {
 
   return (
     <>
-      <div className="mx-auto flex max-w-3xl items-center justify-between px-6 pt-4 text-sm">
-        <span className="opacity-70">Signed in as {session.user.email}</span>
-        <button
-          onClick={() => supabaseBrowser.auth.signOut()}
-          className="rounded border px-3 py-1"
-        >
-          Sign out
-        </button>
+      <div className="border-b border-slate-200 bg-white">
+        <div className="mx-auto flex max-w-6xl items-center justify-between px-4 py-2.5 text-xs sm:px-8">
+          <span className="flex items-center gap-2 font-medium text-slate-500">
+            <span className="h-2 w-2 rounded-full bg-emerald-500" />
+            Signed in as <strong className="text-slate-700">{session.user.email}</strong>
+          </span>
+          <button
+            onClick={() => supabaseBrowser.auth.signOut()}
+            className="rounded-lg border border-slate-200 bg-white px-3 py-1 text-slate-600 transition hover:bg-slate-50 hover:text-slate-900"
+          >
+            Sign out
+          </button>
+        </div>
       </div>
       <div key={session.user.id}>{children}</div>
     </>

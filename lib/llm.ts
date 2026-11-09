@@ -1,12 +1,13 @@
 import { z } from "zod";
 
-const MODEL = process.env.GROQ_MODEL || "openai/gpt-oss-120b";
+const MODEL = process.env.GROQ_MODEL || "openai/gpt-oss-20b";
 
 export async function askJSON<T>(opts: {
   system: string;
   user: string;
   schema: z.ZodType<T>;
   temperature?: number;
+  maxTokens?: number;
 }): Promise<T> {
   let lastErr = "";
 
@@ -14,6 +15,7 @@ export async function askJSON<T>(opts: {
     const body: Record<string, unknown> = {
       model: MODEL,
       temperature: opts.temperature ?? 0.3,
+      max_completion_tokens: opts.maxTokens ?? 4000,
       response_format: { type: "json_object" },
       messages: [
         {
@@ -30,9 +32,10 @@ export async function askJSON<T>(opts: {
     };
     if (MODEL.startsWith("openai/gpt-oss")) body.reasoning_effort = "low";
 
+    // Free tier = 8K tokens/minute per model. On 429, wait as Groq asks, then retry.
     let res = await callGroq(body);
-    for (let i = 0; i < 3 && res.status === 429; i++) {
-      const wait = Math.min(Number(res.headers.get("retry-after")) || 8, 30);
+    for (let i = 0; i < 4 && res.status === 429; i++) {
+      const wait = Math.min(Number(res.headers.get("retry-after")) || 10, 30);
       await new Promise((r) => setTimeout(r, wait * 1000));
       res = await callGroq(body);
     }

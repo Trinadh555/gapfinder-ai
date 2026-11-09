@@ -1,10 +1,11 @@
 import { streamText } from "ai";
 import { groq } from "@ai-sdk/groq";
 import { supabase } from "@/lib/supabase";
+import { getUser, unauthorized } from "@/lib/auth";
 
 export const maxDuration = 60;
 
-const MODEL = process.env.GROQ_MODEL || "openai/gpt-oss-120b";
+const MODEL = process.env.GROQ_MODEL_CHAT || "openai/gpt-oss-120b";
 
 type Msg = { role: "user" | "assistant"; content: string };
 type Passage = { document_id: string; page: number; content: string };
@@ -14,7 +15,6 @@ type TopicRow = {
   exam_questions: string[] | null;
 };
 
-// Typo-tolerant: "important quetions", "imp qns", "expected questions", "past paper"...
 const WANT_IMPORTANT =
   /\b(imp|import\w*|expect\w*|frequent\w*|previous|past|model|exam\w*|board)\b/i;
 const WANT_QUESTIONS = /\b(que\w*|quest\w*|qns?|qs|problems?|paper)\b/i;
@@ -26,18 +26,23 @@ function textResponse(text: string, headers: Record<string, string>) {
   });
 }
 
-// Pure RETRIEVAL from the student's uploaded past paper. No LLM involved.
-async function pastPaperAnswer(question: string, topicName?: string): Promise<string> {
+async function pastPaperAnswer(
+  userId: string,
+  question: string,
+  topicName?: string
+): Promise<string> {
   const { data: syl } = await supabase
     .from("documents")
     .select("id")
     .eq("kind", "syllabus")
+    .eq("user_id", userId)
     .order("created_at", { ascending: false })
     .limit(1);
   const { data: paper } = await supabase
     .from("documents")
     .select("name")
     .eq("kind", "past_paper")
+    .eq("user_id", userId)
     .order("created_at", { ascending: false })
     .limit(1);
 
@@ -52,7 +57,6 @@ async function pastPaperAnswer(question: string, topicName?: string): Promise<st
   const topics = (data ?? []) as TopicRow[];
   const text = question.toLowerCase();
 
-  // Which topics is the student asking about?
   let picked: TopicRow[] = [];
   if (topicName) picked = topics.filter((t) => t.name === topicName);
   if (picked.length === 0) {
@@ -91,6 +95,9 @@ async function pastPaperAnswer(question: string, topicName?: string): Promise<st
 }
 
 export async function POST(req: Request) {
+  const user = await getUser(req);
+  if (!user) return unauthorized();
+
   const { topic, messages } = (await req.json()) as { topic?: string; messages: Msg[] };
   if (!Array.isArray(messages) || messages.length === 0) {
     return Response.json({ error: "messages required" }, { status: 400 });
@@ -99,13 +106,11 @@ export async function POST(req: Request) {
   const userMsgs = messages.filter((m) => m.role === "user");
   const lastUserMsg = userMsgs[userMsgs.length - 1]?.content ?? "";
 
-  // Past-paper questions: answered from stored retrieval results
   if (isPastPaperAsk(lastUserMsg)) {
-    const answer = await pastPaperAnswer(lastUserMsg, topic || undefined);
+    const answer = await pastPaperAnswer(user.id, lastUserMsg, topic || undefined);
     return textResponse(answer, { "X-Sources": encodeURIComponent("[]") });
   }
 
-  // Retrieval query = latest question (+ previous one only if the latest is very short)
   const recent = messages.slice(-8);
   const shortFollowUp = lastUserMsg.trim().split(/\s+/).length < 4;
   const prevUser = userMsgs.length > 1 ? userMsgs[userMsgs.length - 2].content : "";
@@ -117,17 +122,18 @@ export async function POST(req: Request) {
   const { data: noteDocs } = await supabase
     .from("documents")
     .select("id,name")
-    .eq("kind", "notes");
+    .neq("kind", "syllabus")
+    .eq("user_id", user.id);
+
   if (!noteDocs || noteDocs.length === 0) {
     return Response.json({ error: "Upload notes / textbook files first" }, { status: 400 });
   }
   const names = new Map<string, string>(noteDocs.map((d) => [d.id, d.name]));
 
-  // RETRIEVAL: find passages in the student's own material
   const { data, error } = await supabase.rpc("search_chunks", {
     q: query,
     doc_ids: noteDocs.map((d) => d.id),
-    k: 5,
+    k: 4,
   });
   if (error) return Response.json({ error: error.message }, { status: 500 });
 
@@ -140,28 +146,43 @@ export async function POST(req: Request) {
   const headers = { "X-Sources": encodeURIComponent(JSON.stringify(sources)) };
 
   if (passages.length === 0) {
-    return textResponse("This isn't covered in your uploaded material.", {
+    return textResponse("This isn't covered in your uploaded material. Please upload notes covering this topic.", {
       "X-Sources": encodeURIComponent("[]"),
     });
   }
 
   const context = passages
-    .map((p, i) => `[${i + 1}] (${sources[i].doc}, page ${p.page})\n${p.content}`)
+    .map(
+      (p, i) =>
+        `[${i + 1}] (${sources[i].doc}, page ${p.page})\n${p.content.slice(0, 1000)}`
+    )
     .join("\n\n");
 
-  // GENERATION: explain using ONLY the retrieved passages
   const result = streamText({
     model: groq(MODEL),
-    system: `You are a friendly study tutor for a school student.
-Answer ONLY using the numbered passages below. They are text extracted from the student's own PDFs (formulas may be garbled).
-Rules:
-- Cite with plain square brackets like [1] or [2] right after the claims they support. Never use any other bracket style.
-- If the passages do not contain the answer, reply with exactly this sentence and nothing else: "This isn't covered in your uploaded material." Never use outside knowledge.
-- Explain simply, step by step. Write math in plain text (x^2, sqrt(x), a/b), no LaTeX.
+    system: `You are an expert, friendly AI study tutor for a student.
+Your goal is to explain concepts clearly, accurately, and helpfully using the student's uploaded material.
+
+CRITICAL FORMULA & MATH RULES:
+- NEVER use LaTeX syntax like \\[, \\], \\(, \\), \\frac, \\sigma, \\alpha, \\cdot, \\times.
+- Write ALL mathematical formulas in clean, natural, readable plain text!
+  Example:
+  - DO NOT WRITE: \\[ \\sigma (x) = \\frac{1}{1+e^{-x}} \\]
+  - INSTEAD WRITE: σ(x) = 1 / (1 + e^-x)  OR  sigmoid(x) = 1 / (1 + e^-x)
+  - DO NOT WRITE: \\( \\sigma'(x) = \\sigma(x)\\,[1-\\sigma(x)] \\)
+  - INSTEAD WRITE: σ'(x) = σ(x) * (1 - σ(x))
+
+OTHER RULES:
+1. Handle common typos and misspellings automatically (e.g. "manchine learning" means "machine learning").
+2. Primarily ground your answer in the numbered passages below and cite them using plain brackets like [1] or [2].
+3. If a basic definition or bridge concept is helpful, provide it intuitively and link it back to the passages.
+4. ONLY if the question is completely unrelated to study material, reply with: "This isn't covered in your uploaded material."
+5. Use bullet points and clean structure.
 
 PASSAGES:
 ${context}`,
     messages: recent,
+    maxOutputTokens: 900,
     providerOptions: { groq: { reasoningEffort: "low" } },
   });
 

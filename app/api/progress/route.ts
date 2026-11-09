@@ -1,14 +1,22 @@
 import { NextResponse } from "next/server";
 import { supabase } from "@/lib/supabase";
+import { getUser, ownsDoc, unauthorized } from "@/lib/auth";
 
 export async function GET(req: Request) {
+  const user = await getUser(req);
+  if (!user) return unauthorized();
+
   const id = new URL(req.url).searchParams.get("syllabusDocId");
   if (!id) return NextResponse.json({ error: "syllabusDocId required" }, { status: 400 });
+  if (!(await ownsDoc(user.id, id))) {
+    return NextResponse.json({ error: "Not found" }, { status: 404 });
+  }
 
   const { data: attempts, error } = await supabase
     .from("attempts")
     .select("id,score_pct,created_at")
     .eq("syllabus_doc_id", id)
+    .eq("user_id", user.id)
     .order("created_at");
   if (error) return NextResponse.json({ error: error.message }, { status: 500 });
   if (!attempts || attempts.length === 0) {

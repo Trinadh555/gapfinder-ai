@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { z } from "zod";
 import { supabase } from "@/lib/supabase";
 import { askJSON } from "@/lib/llm";
+import { getUser, ownsDoc, unauthorized } from "@/lib/auth";
 
 export const maxDuration = 60;
 
@@ -16,6 +17,9 @@ function statusOf(pct: number): Status {
 }
 
 export async function POST(req: Request) {
+  const user = await getUser(req);
+  if (!user) return unauthorized();
+
   const { syllabusDocId, answers } = (await req.json()) as {
     syllabusDocId: string;
     answers: { questionId: string; chosenIndex: number | null }[];
@@ -23,20 +27,26 @@ export async function POST(req: Request) {
   if (!syllabusDocId || !Array.isArray(answers) || answers.length === 0) {
     return NextResponse.json({ error: "syllabusDocId and answers required" }, { status: 400 });
   }
+  if (!(await ownsDoc(user.id, syllabusDocId))) {
+    return NextResponse.json({ error: "Not found" }, { status: 404 });
+  }
 
   try {
-    const { data: qs, error } = await supabase
-      .from("questions")
-      .select("*")
-      .in("id", answers.map((a) => a.questionId));
-    if (error) throw new Error(error.message);
-    const qMap = new Map((qs ?? []).map((q) => [q.id, q]));
-
     const { data: topics } = await supabase
       .from("topics")
       .select("id,name,exam_count")
       .eq("syllabus_doc_id", syllabusDocId);
     const tMap = new Map((topics ?? []).map((t) => [t.id, t]));
+
+    const { data: qs, error } = await supabase
+      .from("questions")
+      .select("*")
+      .in("id", answers.map((a) => a.questionId));
+    if (error) throw new Error(error.message);
+    // Only questions that belong to this user's syllabus topics
+    const qMap = new Map(
+      (qs ?? []).filter((q) => tMap.has(q.topic_id)).map((q) => [q.id, q])
+    );
 
     type Acc = { total: number; correct: number; wrong: { question: string; subtopic: string }[] };
     const acc = new Map<string, Acc>();
@@ -57,7 +67,8 @@ export async function POST(req: Request) {
         chosenIndex: a.chosenIndex,
         correctIndex: q.correct_index,
         isCorrect,
-        explanation: a.chosenIndex !== null ? expl[a.chosenIndex] ?? "" : "You did not answer this question.",
+        explanation:
+          a.chosenIndex !== null ? expl[a.chosenIndex] ?? "" : "You did not answer this question.",
         correctExplanation: expl[q.correct_index] ?? "",
         citation: { doc: q.source_doc_name, page: q.source_page },
       });
@@ -67,6 +78,10 @@ export async function POST(req: Request) {
       if (isCorrect) t.correct += 1;
       else t.wrong.push({ question: q.question, subtopic: q.subtopic ?? "" });
       acc.set(q.topic_id, t);
+    }
+
+    if (results.length === 0) {
+      return NextResponse.json({ error: "No valid answers submitted" }, { status: 400 });
     }
 
     const topicReports = Array.from(acc.entries()).map(([topicId, t]) => {
@@ -118,11 +133,11 @@ export async function POST(req: Request) {
     topicReports.sort((a, b) => order[a.status] - order[b.status] || b.examCount - a.examCount);
 
     const correctQ = results.filter((r) => r.isCorrect).length;
-    const scorePct = results.length ? Math.round((100 * correctQ) / results.length) : 0;
+    const scorePct = Math.round((100 * correctQ) / results.length);
 
     const { data: attempt, error: aErr } = await supabase
       .from("attempts")
-      .insert({ syllabus_doc_id: syllabusDocId, score_pct: scorePct })
+      .insert({ syllabus_doc_id: syllabusDocId, user_id: user.id, score_pct: scorePct })
       .select()
       .single();
     if (aErr || !attempt) throw new Error(aErr?.message ?? "could not save attempt");
