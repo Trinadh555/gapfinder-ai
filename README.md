@@ -1,9 +1,5 @@
 # 🎓 GapFinder AI — AI-Powered Diagnostic Study & Revision Engine
 
-> **Built for the igebra.ai AI Intern Selection Hackathon**  
-> **Author:** Mummana Trinadh ([GitHub: @Trinadh555](https://github.com/Trinadh555))  
-> **Submission To:** Sandhya Piradi (sandhya@igebra.ai)
-
 ---
 
 ## 🌐 Live Application & Demo Login
@@ -36,9 +32,17 @@ GapFinder AI acts as an **intelligent study doctor**:
 
 ## 🏗️ System Architecture & Workflow
 
-+-------------------------------------------------------------+ | 1. INGESTION & PROCESSING | | Student Uploads PDFs (Notes, Syllabus, Past Papers) | | --> Client-Side Text Extraction (PDF.js CDN) | | (Bypasses Vercel Serverless 4.5MB Body Limit) | | --> Text Chunking & Stored in Supabase Database | +------------------------------+------------------------------+ | v +-------------------------------------------------------------+ | 2. TOPIC & EXAM MAPPING | | Groq LPU Engine extracts chapters and subtopics | | Correlates past exam questions to identify weightage | +------------------------------+------------------------------+ | v +-------------------------------------------------------------+ | 3. DIAGNOSTIC TESTING | | Generates multi-topic shuffled diagnostic quiz | | Student answers questions with custom question count | +------------------------------+------------------------------+ | v +-------------------------------------------------------------+ | 4. DIAGNOSIS & REVISION | | Knowledge Gap Report (🔴 Weak | 🟡 Medium | 🔵 Strong) | | Day-by-Day Adaptive Revision Plan tailored to hours/days | | Interactive AI Study Tutor with exact page citations | +-------------------------------------------------------------+
-
-
+```mermaid
+graph TD
+    A["📄 Upload Materials (Notes, Syllabus, Past Papers)"] --> B["⚡ In-Browser Text Extraction (PDF.js)"]
+    B --> C[("🗄️ Supabase Vector Database & Chunks")]
+    C --> D["🧠 Groq LPU Engine (openai/gpt-oss-120b)"]
+    D --> E["📋 Automated Topic Map & Exam Frequency"]
+    E --> F["🎯 Multi-Topic Mixed Diagnostic Quiz"]
+    F --> G["🩺 Gap Diagnosis (🔴 Weak | 🟡 Medium | 🔵 Strong)"]
+    G --> H["📅 Day-by-Day Adaptive Revision Plan"]
+    G --> I["💬 Grounded AI Tutor with Page Citations [1]"]
+```
 
 ---
 
@@ -102,9 +106,17 @@ GapFinder AI acts as an **intelligent study doctor**:
 ```bash
 git clone https://github.com/Trinadh555/gapfinder-ai.git
 cd gapfinder-ai
+```
 
+### 2. Install dependencies
+```bash
 npm install
+```
 
+### 3. Environment Variables
+Create a `.env.local` file in the project root with the following keys:
+
+```env
 # Supabase Configuration
 NEXT_PUBLIC_SUPABASE_URL=your_supabase_project_url
 NEXT_PUBLIC_SUPABASE_ANON_KEY=your_supabase_anon_key
@@ -114,5 +126,13 @@ SUPABASE_SERVICE_ROLE_KEY=your_supabase_service_role_key
 GROQ_API_KEY=your_groq_api_key
 GROQ_MODEL=openai/gpt-oss-120b
 GROQ_MODEL_CHAT=openai/gpt-oss-120b
+```
 
+### 4. Run the development server
+```bash
 npm run dev
+```
+Open [http://localhost:3000](http://localhost:3000) in your browser.
+
+---
+
