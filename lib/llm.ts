@@ -1,13 +1,13 @@
 import { z } from "zod";
 
-// High-speed, high-quota Groq models
-const PRIMARY_MODEL = "llama-3.3-70b-versatile";
-const FALLBACK_MODEL = "llama-3.1-8b-instant";
+// The 2 authorized models on this Groq organization
+const PRIMARY_MODEL = "openai/gpt-oss-120b";
+const FALLBACK_MODEL = "openai/gpt-oss-20b";
 
 function getActiveModel(): string {
   const envModel = process.env.GROQ_MODEL;
-  // If env specifies the exhausted gpt-oss-20b or is missing, use llama-3.3
-  if (!envModel || envModel.includes("gpt-oss-20b")) {
+  // If env has llama or gpt-oss-20b, prefer gpt-oss-120b which has fresh quota
+  if (!envModel || envModel.includes("llama") || envModel.includes("gpt-oss-20b")) {
     return PRIMARY_MODEL;
   }
   return envModel;
@@ -24,35 +24,41 @@ export async function askJSON<T>(opts: {
   let currentModel = getActiveModel();
 
   for (let attempt = 0; attempt < 2; attempt++) {
-    const makeBody = (model: string): Record<string, unknown> => ({
-      model,
-      temperature: opts.temperature ?? 0.2,
-      max_completion_tokens: opts.maxTokens ?? 2000,
-      response_format: { type: "json_object" },
-      messages: [
-        {
-          role: "system",
-          content: opts.system + "\nRespond with a single valid JSON object only.",
-        },
-        {
-          role: "user",
-          content:
-            opts.user +
-            (lastErr ? `\n\nYour previous reply was invalid (${lastErr}). Fix it.` : ""),
-        },
-      ],
-    });
+    const makeBody = (model: string): Record<string, unknown> => {
+      const body: Record<string, unknown> = {
+        model,
+        temperature: opts.temperature ?? 0.2,
+        max_completion_tokens: opts.maxTokens ?? 2000,
+        response_format: { type: "json_object" },
+        messages: [
+          {
+            role: "system",
+            content: opts.system + "\nRespond with a single valid JSON object only.",
+          },
+          {
+            role: "user",
+            content:
+              opts.user +
+              (lastErr ? `\n\nYour previous reply was invalid (${lastErr}). Fix it.` : ""),
+          },
+        ],
+      };
+      if (model.startsWith("openai/gpt-oss")) {
+        body.reasoning_effort = "low";
+      }
+      return body;
+    };
 
     let res = await callGroq(makeBody(currentModel));
 
-    // 1. If 429 Rate limit hit, immediately switch to the high-quota fallback model
-    if (res.status === 429 && currentModel !== FALLBACK_MODEL) {
-      console.warn(`[Groq] Rate limit hit on ${currentModel}. Switching to fallback: ${FALLBACK_MODEL}`);
+    // If 429 (Rate limit) or 404, switch between the 2 authorized models
+    if ((res.status === 429 || res.status === 404) && currentModel !== FALLBACK_MODEL) {
+      console.warn(`[Groq] ${currentModel} returned ${res.status}. Switching to fallback: ${FALLBACK_MODEL}`);
       currentModel = FALLBACK_MODEL;
       res = await callGroq(makeBody(currentModel));
     }
 
-    // 2. If still waiting for tokens, sleep max 2 seconds
+    // Quick wait (max 2 seconds) if needed
     if (res.status === 429) {
       const wait = Math.min(Number(res.headers.get("retry-after")) || 2, 3);
       await new Promise((r) => setTimeout(r, wait * 1000));
@@ -61,7 +67,6 @@ export async function askJSON<T>(opts: {
 
     if (!res.ok) {
       const errText = await res.text();
-      // If error text mentions tokens per day and fallback hasn't been tried yet
       if (currentModel !== FALLBACK_MODEL) {
         currentModel = FALLBACK_MODEL;
         res = await callGroq(makeBody(currentModel));
