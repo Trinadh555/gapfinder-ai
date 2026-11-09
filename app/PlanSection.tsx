@@ -1,5 +1,6 @@
 "use client";
 import { useEffect, useState } from "react";
+import { authFetch } from "@/lib/authFetch";
 
 type Status = "weak" | "medium" | "strong";
 type Session = { topic: string; minutes: number; status: Status };
@@ -27,7 +28,7 @@ export default function PlanSection({ syllabusDocId }: { syllabusDocId: string }
 
   useEffect(() => {
     let cancelled = false;
-    fetch("/api/plan", {
+    authFetch("/api/plan", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({

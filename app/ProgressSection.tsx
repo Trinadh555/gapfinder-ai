@@ -1,5 +1,6 @@
 "use client";
 import { useEffect, useState } from "react";
+import { authFetch } from "@/lib/authFetch";
 
 type Progress = {
   attempts: { n: number; scorePct: number; createdAt: string }[];
@@ -28,7 +29,7 @@ export default function ProgressSection({ syllabusDocId }: { syllabusDocId: stri
 
   useEffect(() => {
     let cancelled = false;
-    fetch(`/api/progress?syllabusDocId=${syllabusDocId}`)
+    authFetch(`/api/progress?syllabusDocId=${syllabusDocId}`)
       .then((r) => r.json())
       .then((d) => {
         if (!cancelled && d.attempts) setData(d);

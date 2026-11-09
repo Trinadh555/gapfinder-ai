@@ -2,8 +2,12 @@ import { NextResponse } from "next/server";
 import { extractText, getDocumentProxy } from "unpdf";
 import { supabase } from "@/lib/supabase";
 import { chunkPages } from "@/lib/chunk";
+import { getUser, unauthorized } from "@/lib/auth";
 
 export async function POST(req: Request) {
+  const user = await getUser(req);
+  if (!user) return unauthorized();
+
   const form = await req.formData();
   const file = form.get("file") as File | null;
   const kind = form.get("kind") as string;
@@ -31,7 +35,7 @@ export async function POST(req: Request) {
 
   const { data: doc, error } = await supabase
     .from("documents")
-    .insert({ name: file.name, kind })
+    .insert({ name: file.name, kind, user_id: user.id })
     .select()
     .single();
   if (error) return NextResponse.json({ error: error.message }, { status: 500 });

@@ -1,5 +1,6 @@
 "use client";
 import { useState } from "react";
+import { authFetch } from "@/lib/authFetch";
 
 type Source = { n: number; doc: string; page: number };
 type Msg = { role: "user" | "assistant"; content: string; sources?: Source[] };
@@ -27,7 +28,7 @@ export default function ExplainSection({
     setError("");
 
     try {
-      const res = await fetch("/api/explain", {
+      const res = await authFetch("/api/explain", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({

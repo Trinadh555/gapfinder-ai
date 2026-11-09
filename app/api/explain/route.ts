@@ -14,9 +14,11 @@ type TopicRow = {
   exam_questions: string[] | null;
 };
 
-// "important questions on matrices", "past paper questions", "expected questions"...
-const IMPORTANT_RE =
-  /\b(important|expected|frequently asked|previous year|past paper|model paper|exam)\b.*\b(questions?|problems?|paper)\b|\b(questions?|problems?)\b.*\b(important|expected|exam|past paper|model paper|previous)\b/i;
+// Typo-tolerant: "important quetions", "imp qns", "expected questions", "past paper"...
+const WANT_IMPORTANT =
+  /\b(imp|import\w*|expect\w*|frequent\w*|previous|past|model|exam\w*|board)\b/i;
+const WANT_QUESTIONS = /\b(que\w*|quest\w*|qns?|qs|problems?|paper)\b/i;
+const isPastPaperAsk = (t: string) => WANT_IMPORTANT.test(t) && WANT_QUESTIONS.test(t);
 
 function textResponse(text: string, headers: Record<string, string>) {
   return new Response(text, {
@@ -94,17 +96,20 @@ export async function POST(req: Request) {
     return Response.json({ error: "messages required" }, { status: 400 });
   }
 
-  const lastUserMsg = [...messages].reverse().find((m) => m.role === "user")?.content ?? "";
+  const userMsgs = messages.filter((m) => m.role === "user");
+  const lastUserMsg = userMsgs[userMsgs.length - 1]?.content ?? "";
 
   // Past-paper questions: answered from stored retrieval results
-  if (IMPORTANT_RE.test(lastUserMsg)) {
+  if (isPastPaperAsk(lastUserMsg)) {
     const answer = await pastPaperAnswer(lastUserMsg, topic || undefined);
     return textResponse(answer, { "X-Sources": encodeURIComponent("[]") });
   }
 
+  // Retrieval query = latest question (+ previous one only if the latest is very short)
   const recent = messages.slice(-8);
-  const lastUser = recent.filter((m) => m.role === "user").slice(-2);
-  const query = [topic, ...lastUser.map((m) => m.content)]
+  const shortFollowUp = lastUserMsg.trim().split(/\s+/).length < 4;
+  const prevUser = userMsgs.length > 1 ? userMsgs[userMsgs.length - 2].content : "";
+  const query = [topic, shortFollowUp ? prevUser : "", lastUserMsg]
     .filter(Boolean)
     .join(" ")
     .slice(0, 400);
@@ -135,7 +140,9 @@ export async function POST(req: Request) {
   const headers = { "X-Sources": encodeURIComponent(JSON.stringify(sources)) };
 
   if (passages.length === 0) {
-    return textResponse("This isn't covered in your uploaded material.", headers);
+    return textResponse("This isn't covered in your uploaded material.", {
+      "X-Sources": encodeURIComponent("[]"),
+    });
   }
 
   const context = passages
@@ -148,7 +155,7 @@ export async function POST(req: Request) {
     system: `You are a friendly study tutor for a school student.
 Answer ONLY using the numbered passages below. They are text extracted from the student's own PDFs (formulas may be garbled).
 Rules:
-- Add citations like [1] or [2] after the claims they support.
+- Cite with plain square brackets like [1] or [2] right after the claims they support. Never use any other bracket style.
 - If the passages do not contain the answer, reply with exactly this sentence and nothing else: "This isn't covered in your uploaded material." Never use outside knowledge.
 - Explain simply, step by step. Write math in plain text (x^2, sqrt(x), a/b), no LaTeX.
 

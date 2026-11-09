@@ -1,8 +1,10 @@
 "use client";
 import { useCallback, useEffect, useState } from "react";
 import PlanSection from "./PlanSection";
+import AuthGate from "./AuthGate";
 import ExplainSection from "./ExplainSection";
 import ProgressSection from "./ProgressSection";
+import { authFetch } from "@/lib/authFetch";
 
 type Doc = { id: string; name: string; kind: string; chunks: number };
 type Topic = { id: string; name: string; subtopics: string[]; exam_count: number };
@@ -53,7 +55,7 @@ const LABEL: Record<Status, string> = {
 };
 
 async function post(url: string, body: unknown) {
-  const res = await fetch(url, {
+  const res = await authFetch(url, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
@@ -63,7 +65,7 @@ async function post(url: string, body: unknown) {
   return data;
 }
 
-export default function Home() {
+function Dashboard() {
   const [docs, setDocs] = useState<Doc[]>([]);
   const [kind, setKind] = useState("notes");
   const [busy, setBusy] = useState("");
@@ -80,14 +82,14 @@ export default function Home() {
 
   // Used after an upload to refresh the document list
   const loadDocs = useCallback(async () => {
-    const res = await fetch("/api/documents");
+    const res = await authFetch("/api/documents");
     if (res.ok) setDocs(await res.json());
   }, []);
 
   // Load documents once when the page opens
   useEffect(() => {
     let cancelled = false;
-    fetch("/api/documents")
+    authFetch("/api/documents")
       .then((r) => (r.ok ? r.json() : []))
       .then((d) => {
         if (!cancelled) setDocs(d);
@@ -100,7 +102,7 @@ export default function Home() {
   // Load saved topic map for the syllabus
   useEffect(() => {
     if (!syllabus?.id) return;
-    fetch(`/api/topics?syllabusDocId=${syllabus.id}`)
+    authFetch(`/api/topics?syllabusDocId=${syllabus.id}`)
       .then((r) => r.json())
       .then((d) => {
         if (d.topics?.length) {
@@ -128,7 +130,7 @@ export default function Home() {
     const fd = new FormData(form);
     fd.set("kind", kind);
     await run("Uploading...", async () => {
-      const res = await fetch("/api/upload", { method: "POST", body: fd });
+      const res = await authFetch("/api/upload", { method: "POST", body: fd });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error ?? "Upload failed");
       await loadDocs();
@@ -155,7 +157,7 @@ export default function Home() {
       post("/api/quiz", {
         syllabusDocId: syllabus.id,
         topicIds: Array.from(selected),
-        perTopic: 3,
+        perTopic: 2,
       })
     );
     if (data) {
@@ -395,13 +397,24 @@ export default function Home() {
       {report && syllabus && (
         <PlanSection key={report.attemptId} syllabusDocId={syllabus.id} />
       )}
-            {syllabus && topics.length > 0 && (
+
+      {/* 6. Explain this topic */}
+      {syllabus && topics.length > 0 && (
         <ExplainSection topics={topics.map((t) => ({ id: t.id, name: t.name }))} />
       )}
 
+      {/* 7. Progress dashboard */}
       {syllabus && (
         <ProgressSection key={report?.attemptId ?? "initial"} syllabusDocId={syllabus.id} />
       )}
     </main>
+  );
+}
+
+export default function Home() {
+  return (
+    <AuthGate>
+      <Dashboard />
+    </AuthGate>
   );
 }
